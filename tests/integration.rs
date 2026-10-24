@@ -1,11 +1,11 @@
+use assert_cmd::assert::OutputAssertExt;
 use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
+use tempfile::TempDir;
 
 fn command(path: &Path) -> Command {
     let mut cmd = Command::new("git");
@@ -34,6 +34,7 @@ fn identity(path: &Path) {
 }
 
 struct Fixture {
+    _temp: TempDir,
     base: PathBuf,
     root: PathBuf,
     child: PathBuf,
@@ -47,12 +48,11 @@ impl Fixture {
         } else {
             std::env::temp_dir()
         };
-        let base = temp.join(format!(
-            "git-sync-refs-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&base).unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("git-sync-refs-test-")
+            .tempdir_in(temp)
+            .unwrap();
+        let base = temp.path().to_owned();
         for name in ["grand", "child", "root"] {
             let bare = base.join(format!("{name}.git"));
             fs::create_dir(&bare).unwrap();
@@ -101,6 +101,7 @@ impl Fixture {
         identity(&child);
         identity(&grand);
         Self {
+            _temp: temp,
             base,
             root,
             child,
@@ -109,7 +110,8 @@ impl Fixture {
     }
 
     fn run(&self) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_git-sync-submodule-refs"))
+        assert_cmd::Command::new(env!("CARGO_BIN_EXE_git-sync-submodule-refs"))
+            .timeout(Duration::from_secs(30))
             .current_dir(&self.root)
             .env("GIT_ALLOW_PROTOCOL", "file")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -136,9 +138,8 @@ impl Fixture {
             .iter()
             .map(|p| git(&self.base.join(p), &["rev-parse", "main"]))
             .collect();
-        let output = self.run();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success(), "Unexpected success");
+        let assertion = self.run().assert().failure();
+        let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
         assert!(stderr.contains(needle), "Expected {needle:?}: {stderr}");
         for (i, path) in [&self.root, &self.child, &self.grand].iter().enumerate() {
             assert_eq!(before[i], git(path, &["rev-parse", "HEAD"]));
@@ -152,22 +153,11 @@ impl Fixture {
     }
 }
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.base).unwrap();
-    }
-}
-
 #[test]
 fn clean_tree_is_a_noop() {
     let f = Fixture::new();
     let before = git(&f.root, &["rev-parse", "HEAD"]);
-    let output = f.run();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    f.run().assert().success();
     assert_eq!(before, git(&f.root, &["rev-parse", "HEAD"]));
 }
 
@@ -333,4 +323,65 @@ fn rejected_child_push_does_not_commit_parent_reference() {
     fs::write(&hook, "#!/bin/sh\necho 'test rejection' >&2\nexit 1\n").unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     f.unchanged_after_failure("test rejection");
+}
+
+#[test]
+fn pushes_existing_commits_without_reference_changes() {
+    let f = Fixture::new();
+    Fixture::commit(&f.root);
+    let before = git(&f.root, &["rev-parse", "HEAD"]);
+    f.run().assert().success();
+    assert_eq!(before, git(&f.root, &["rev-parse", "HEAD"]));
+    assert_eq!(
+        before,
+        git(&f.base.join("root.git"), &["rev-parse", "main"])
+    );
+}
+
+#[test]
+fn submodule_ignore_config_cannot_hide_nested_work() {
+    let f = Fixture::new();
+    git(&f.root, &["config", "submodule.child module.ignore", "all"]);
+    git(&f.child, &["config", "submodule.nested.ignore", "all"]);
+    git(&f.grand, &["config", "status.showUntrackedFiles", "no"]);
+    fs::write(f.grand.join("untracked"), "new").unwrap();
+    f.unchanged_after_failure("untracked");
+}
+
+#[test]
+fn unusual_filename_is_reported_and_blocks_everything() {
+    let f = Fixture::new();
+    fs::write(f.grand.join(" leading\tname\ntrailing "), "new").unwrap();
+    f.unchanged_after_failure("leading\\tname\\ntrailing");
+}
+
+#[test]
+fn staged_rename_blocks_everything() {
+    let f = Fixture::new();
+    git(&f.grand, &["mv", "file.txt", "new name"]);
+    f.unchanged_after_failure("new name");
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_type_change_blocks_everything() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    fs::remove_file(f.grand.join("file.txt")).unwrap();
+    symlink("target", f.grand.join("file.txt")).unwrap();
+    git(&f.grand, &["add", "file.txt"]);
+    f.unchanged_after_failure("file.txt");
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_path_is_rejected_without_lossy_conversion() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let f = Fixture::new();
+    fs::write(
+        f.grand.join(OsString::from_vec(b"invalid-\xff".to_vec())),
+        "new",
+    )
+    .unwrap();
+    f.unchanged_after_failure("Non-UTF-8 Git paths are not supported");
 }

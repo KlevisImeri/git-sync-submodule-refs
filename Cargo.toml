@@ -8,3 +8,11 @@ description = "Safely commit and push recursive Git submodule reference updates"
 repository = "https://github.com/KlevisImeri/git-sync-submodule-refs-"
 
 [dependencies]
+anyhow = "1"
+bstr = { version = "1", default-features = false, features = ["std"] }
+git-spawn = "0.4"
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"

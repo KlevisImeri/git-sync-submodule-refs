@@ -4,7 +4,7 @@ Recursively commit and push submodule reference updates, only when no other unco
 
 ## Install
 
-Requires Rust/Cargo to build, and Git on your `PATH` at runtime. No third-party Rust dependencies.
+Requires Rust/Cargo to build, and Git on your `PATH` at runtime. Git operations run through `git-spawn`, using your installed Git rather than libgit2.
 
 ```sh
 cargo install --git https://github.com/KlevisImeri/git-sync-submodule-refs-.git --locked
@@ -51,6 +51,12 @@ cargo install --path . --locked
 ```
 
 Integration tests use isolated local repositories and bare remotes, not your working projects.
+
+The implementation uses `git-spawn` for command execution and porcelain status parsing, Tokio for its async runtime, `anyhow` for contextual errors, and `bstr` for byte-oriented tree/index parsing. Tests use `tempfile` for temporary repositories and `assert_cmd` for CLI assertions and timeouts. Recursive validation and push ordering remain explicit in this tool; no broad commit-all or sync workflow helpers are used.
+
+## Formal verification
+
+The CLI's pure change classifier is translated from Rust through Charon and Aeneas into Lean. The first property proves that ordinary-file changes are rejected for every status. Run `make verify-lean` to regenerate and check it. See [verification/README.md](verification/README.md) for pinned tools and the proof boundary. Integration tests remain in place.
 
 ## License
 

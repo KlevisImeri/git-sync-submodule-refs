@@ -1,0 +1,14 @@
+name = "sync_submodule_refs_verification"
+version = "0.1.0"
+defaultTargets = ["SafetyProofs"]
+
+[[lean_lib]]
+name = "Generated"
+
+[[lean_lib]]
+name = "SafetyProofs"
+
+[[require]]
+name = "aeneas"
+git = { url = "https://github.com/AeneasVerif/aeneas", subDir = "backends/lean" }
+rev = "74aabd52f77001cf9eaad51b4f4b867a7dc6b111"

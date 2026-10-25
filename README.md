@@ -1,5 +1,8 @@
 # git-sync-submodule-refs
 
+> [!WARNING]
+> This tool is under heavy development. The code needs substantial cleanup, review, and further testing. **Do not use this tool unless you really, really need it.** It commits and pushes changes to your repositories; use it entirely at your own risk.
+
 Recursively commit and push submodule reference updates, only when no other uncommitted changes exist anywhere in the repository tree.
 
 ## Install

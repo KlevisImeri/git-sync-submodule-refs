@@ -1,12 +1,18 @@
 name = "sync_submodule_refs_verification"
 version = "0.1.0"
-defaultTargets = ["SafetyProofs"]
+defaultTargets = ["SafetyProofs", "WorkflowProofs", "GitContracts"]
 
 [[lean_lib]]
 name = "Generated"
 
 [[lean_lib]]
 name = "SafetyProofs"
+
+[[lean_lib]]
+name = "WorkflowProofs"
+
+[[lean_lib]]
+name = "GitContracts"
 
 [[require]]
 name = "aeneas"

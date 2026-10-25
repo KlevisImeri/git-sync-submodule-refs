@@ -52,4 +52,43 @@ def allowed_change
     else ok false
   else ok false
 
+/-- [sync_safety::Validation]
+    Source: 'src/safety.rs', lines 21:0-24:1
+    Visibility: public -/
+@[discriminant isize]
+inductive Validation where
+| Passed : Validation
+| Failed : Validation
+
+/-- [sync_safety::{sync_safety::Validation}::check]:
+    Source: 'src/safety.rs', lines 27:4-32:5
+    Visibility: public -/
+def Validation.check
+  (self : Validation) (accepted : Bool) : Result Validation := do
+  match self with
+  | Validation.Passed =>
+    if accepted
+    then ok Validation.Passed
+    else ok Validation.Failed
+  | Validation.Failed => ok Validation.Failed
+
+/-- [sync_safety::{sync_safety::Validation}::passed]:
+    Source: 'src/safety.rs', lines 34:4-36:5
+    Visibility: public -/
+def Validation.passed (self : Validation) : Result Bool := do
+  match self with
+  | Validation.Passed => ok true
+  | Validation.Failed => ok false
+
+/-- [sync_safety::staged_reference_allowed]:
+    Source: 'src/safety.rs', lines 40:0-45:1
+    Visibility: public -/
+def staged_reference_allowed
+  (index_matches_recorded : Bool) (index_matches_checkout : Bool) :
+  Result Bool
+  := do
+  if index_matches_recorded
+  then ok true
+  else ok index_matches_checkout
+
 end sync_safety

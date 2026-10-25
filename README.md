@@ -56,7 +56,7 @@ The implementation uses `git-spawn` for command execution and porcelain status p
 
 ## Formal verification
 
-The CLI's pure change classifier is translated from Rust through Charon and Aeneas into Lean. The first property proves that ordinary-file changes are rejected for every status. Run `make verify-lean` to regenerate and check it. See [verification/README.md](verification/README.md) for pinned tools and the proof boundary. Integration tests remain in place.
+The CLI's actual workflow controller and pure safety functions are translated from Rust through Charon and Aeneas into Lean. Proofs cover classification, preflight before mutations, child-first processing of checked dependencies, failure stopping, and publication coverage on successful completion. Git-facing wrappers and the thin async dispatcher have explicit trusted contracts; Git itself and our parser/adapter are not proved. Run `make verify-lean` to regenerate and check the proofs. See [verification/README.md](verification/README.md) for the guarantees, assumptions, and pinned tools. Integration tests remain in place.
 
 ## License
 

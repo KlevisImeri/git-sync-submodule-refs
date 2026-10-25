@@ -6,6 +6,8 @@ generate-lean:
 	mkdir -p target/verification verification/Generated
 	charon rustc --preset=aeneas --sysroot=default --dest-file target/verification/sync_safety.llbc -- --crate-type lib --crate-name sync_safety --edition=2024 src/safety.rs --out-dir target/verification
 	aeneas -backend lean -dest verification/Generated target/verification/sync_safety.llbc
+	charon rustc --preset=aeneas --sysroot=default --dest-file target/verification/sync_workflow.llbc -- --crate-type lib --crate-name sync_workflow --edition=2024 src/workflow.rs --out-dir target/verification
+	aeneas -backend lean -dest verification/Generated target/verification/sync_workflow.llbc
 
 verify-lean: generate-lean
 	cd verification && lake build

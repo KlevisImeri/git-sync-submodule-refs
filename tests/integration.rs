@@ -202,6 +202,79 @@ fn dirty_nested_file_blocks_all_commits_and_pushes() {
 }
 
 #[test]
+fn staged_reference_different_from_checkout_blocks_everything() {
+    let f = Fixture::new();
+    let original = git(&f.grand, &["rev-parse", "HEAD"]);
+    Fixture::commit(&f.grand);
+    git(&f.child, &["add", "--", "nested"]);
+    git(&f.grand, &["checkout", "--detach", &original]);
+    let index = git(&f.child, &["ls-files", "--stage", "nested"]);
+    f.unchanged_after_failure("staged submodule reference differs from its checkout");
+    assert_eq!(index, git(&f.child, &["ls-files", "--stage", "nested"]));
+}
+
+#[test]
+fn dirty_post_commit_hook_stops_before_push_or_parent_commit() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    git(&f.grand, &["checkout", "main"]);
+    Fixture::commit(&f.grand);
+    let root_before = git(&f.root, &["rev-parse", "HEAD"]);
+    let remote_before = git(&f.base.join("child.git"), &["rev-parse", "main"]);
+    let child_before = git(&f.child, &["rev-parse", "HEAD"]);
+    let hook = f.child.join(git(
+        &f.child,
+        &["rev-parse", "--git-path", "hooks/post-commit"],
+    ));
+    fs::write(&hook, "#!/bin/sh\nprintf 'dirty\\n' > file.txt\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = f.run();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("uncommitted work"));
+    assert_ne!(child_before, git(&f.child, &["rev-parse", "HEAD"]));
+    assert_eq!(root_before, git(&f.root, &["rev-parse", "HEAD"]));
+    assert_eq!(
+        remote_before,
+        git(&f.base.join("child.git"), &["rev-parse", "main"])
+    );
+}
+
+#[test]
+fn rejected_commit_stops_before_push_or_parent_processing() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    git(&f.grand, &["checkout", "main"]);
+    Fixture::commit(&f.grand);
+    let root_before = git(&f.root, &["rev-parse", "HEAD"]);
+    let child_before = git(&f.child, &["rev-parse", "HEAD"]);
+    let remote_before = git(&f.base.join("child.git"), &["rev-parse", "main"]);
+    let hook = f.child.join(git(
+        &f.child,
+        &["rev-parse", "--git-path", "hooks/pre-commit"],
+    ));
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho 'commit rejected by test' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = f.run();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("commit rejected by test"));
+    assert_eq!(root_before, git(&f.root, &["rev-parse", "HEAD"]));
+    assert_eq!(child_before, git(&f.child, &["rev-parse", "HEAD"]));
+    assert_eq!(
+        remote_before,
+        git(&f.base.join("child.git"), &["rev-parse", "main"])
+    );
+    // Earlier successful operations are not rolled back.
+    assert_eq!(
+        git(&f.grand, &["rev-parse", "HEAD"]),
+        git(&f.base.join("grand.git"), &["rev-parse", "main"])
+    );
+}
+
+#[test]
 fn staged_root_file_blocks_everything() {
     let f = Fixture::new();
     Fixture::commit(&f.child);

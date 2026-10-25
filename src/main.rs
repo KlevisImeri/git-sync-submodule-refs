@@ -1,6 +1,7 @@
 mod git;
 mod parse;
 mod safety;
+mod workflow;
 
 use anyhow::{Context, Result, bail};
 use git::{bytes, git, head, predicate};
@@ -23,6 +24,42 @@ impl From<StatusKind> for safety::ChangeStatus {
 #[cfg(test)]
 mod safety_tests {
     use super::*;
+
+    #[test]
+    fn validation_report_blocks_after_any_rejection() {
+        assert!(ValidationReport::new().finish().is_ok());
+        let mut report = ValidationReport::new();
+        report.reject("first repository is dirty".to_owned());
+        report.reject("nested repository is dirty".to_owned());
+        let error = report.finish().unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "first repository is dirty\nnested repository is dirty"
+        );
+    }
+
+    #[test]
+    fn successful_checks_cannot_clear_a_failed_validation() {
+        let mut validation = safety::Validation::Passed.check(true);
+        assert!(validation.passed());
+        validation = validation.check(false);
+        for _ in 0..10 {
+            validation = validation.check(true);
+            assert!(!validation.passed());
+        }
+    }
+
+    #[test]
+    fn staged_reference_must_be_unchanged_or_match_checkout() {
+        for unchanged in [false, true] {
+            for checkout in [false, true] {
+                assert_eq!(
+                    safety::staged_reference_allowed(unchanged, checkout),
+                    unchanged || checkout
+                );
+            }
+        }
+    }
 
     #[test]
     fn git_status_adapter_preserves_classification() {
@@ -72,6 +109,34 @@ struct Repo {
     branch: Option<String>,
 }
 
+/// Keep diagnostics and the shared, monotonic validation gate together.
+struct ValidationReport {
+    errors: Vec<String>,
+    validation: safety::Validation,
+}
+
+impl ValidationReport {
+    fn new() -> Self {
+        Self {
+            errors: Vec::new(),
+            validation: safety::Validation::Passed,
+        }
+    }
+
+    fn reject(&mut self, error: String) {
+        let validation = std::mem::replace(&mut self.validation, safety::Validation::Failed);
+        self.validation = validation.check(false);
+        self.errors.push(error);
+    }
+
+    fn finish(self) -> Result<()> {
+        if !self.validation.passed() {
+            bail!("{}", self.errors.join("\n"));
+        }
+        Ok(())
+    }
+}
+
 // Parse NUL-delimited records, never whitespace-delimited file names.
 async fn modules(repo: &Path) -> Result<Vec<Module>> {
     let recorded = parse::gitlinks(&bytes(repo, &["ls-tree", "-rz", "HEAD"]).await?, false)
@@ -94,7 +159,7 @@ async fn modules(repo: &Path) -> Result<Vec<Module>> {
         .collect())
 }
 
-async fn inspect(path: &Path, repos: &mut Vec<Repo>, errors: &mut Vec<String>) -> Result<()> {
+async fn inspect(path: &Path, repos: &mut Vec<Repo>, errors: &mut ValidationReport) -> Result<()> {
     let top = git(path, &["rev-parse", "--show-toplevel"]).await?;
     if Path::new(top.strip_suffix('\n').unwrap_or(&top))
         .canonicalize()
@@ -119,7 +184,7 @@ async fn inspect(path: &Path, repos: &mut Vec<Repo>, errors: &mut Vec<String>) -
             .join(state_path.strip_suffix('\n').unwrap_or(&state_path))
             .exists()
         {
-            errors.push(format!(
+            errors.reject(format!(
                 "{}: unfinished or active Git operation ({state})",
                 path.display()
             ));
@@ -142,7 +207,7 @@ async fn inspect(path: &Path, repos: &mut Vec<Repo>, errors: &mut Vec<String>) -
     {
         let is_module = modules.iter().any(|m| m.path == entry.path);
         if !safety::allowed_change(is_module, entry.index.into(), entry.worktree.into()) {
-            errors.push(format!(
+            errors.reject(format!(
                 "{}: uncommitted work: {:?} ({:?}/{:?})",
                 path.display(),
                 entry.path,
@@ -155,24 +220,29 @@ async fn inspect(path: &Path, repos: &mut Vec<Repo>, errors: &mut Vec<String>) -
         let child = path.join(&module.path);
         // Git must not accidentally resolve an uninitialized child to its parent.
         if !child.join(".git").exists() {
-            errors.push(format!("{}: submodule is not initialized", child.display()));
+            errors.reject(format!("{}: submodule is not initialized", child.display()));
             continue;
         }
         match head(&child).await {
-            Ok(current) if module.indexed != module.recorded && module.indexed != current => {
-                errors.push(format!(
+            Ok(current)
+                if !safety::staged_reference_allowed(
+                    module.indexed == module.recorded,
+                    module.indexed == current,
+                ) =>
+            {
+                errors.reject(format!(
                     "{}: staged submodule reference differs from its checkout",
                     child.display()
                 ));
             }
             Err(e) => {
-                errors.push(format!("{e:#}"));
+                errors.reject(format!("{e:#}"));
                 continue;
             }
             _ => {}
         }
         if let Err(e) = Box::pin(inspect(&child, repos, errors)).await {
-            errors.push(format!("{e:#}"));
+            errors.reject(format!("{e:#}"));
         }
     }
     let branch_args = ["symbolic-ref", "--quiet", "--short", "HEAD"];
@@ -191,13 +261,11 @@ async fn inspect(path: &Path, repos: &mut Vec<Repo>, errors: &mut Vec<String>) -
 
 async fn tree(root: &Path) -> Result<Vec<Repo>> {
     let mut repos = Vec::new();
-    let mut errors = Vec::new();
+    let mut errors = ValidationReport::new();
     if let Err(e) = inspect(root, &mut repos, &mut errors).await {
-        errors.push(format!("{e:#}"));
+        errors.reject(format!("{e:#}"));
     }
-    if !errors.is_empty() {
-        bail!("{}", errors.join("\n"));
-    }
+    errors.finish()?;
     Ok(repos)
 }
 
@@ -268,6 +336,176 @@ async fn publishable(repo: &Repo, will_change: bool) -> Result<()> {
     Ok(())
 }
 
+struct Prepared {
+    repo: Repo,
+    changes: Vec<(String, String, String)>,
+    message: String,
+}
+
+/// Trusted effect boundary for the translated workflow controller.
+/// Contracts and the deliberately unverified adapter are documented in verification/.
+struct GitBoundary {
+    root: PathBuf,
+    repos: Vec<Repo>,
+    changing: Vec<PathBuf>,
+    prepared: Option<Prepared>,
+}
+
+impl GitBoundary {
+    async fn validate(&self) -> Result<()> {
+        let current = tree(&self.root).await?;
+        if current.len() != self.repos.len()
+            || current
+                .iter()
+                .zip(&self.repos)
+                .any(|(a, b)| a.path != b.path)
+        {
+            bail!("Repository tree changed during execution");
+        }
+        for (parent, repo) in self.repos.iter().enumerate() {
+            for module in &repo.modules {
+                let child_path = repo.path.join(&module.path);
+                let child = self
+                    .repos
+                    .iter()
+                    .position(|r| r.path == child_path)
+                    .context("Repository tree is missing a child")?;
+                if !workflow::child_before_parent(child, parent) {
+                    bail!("Repository order is not child-first");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn fetch(&self, index: usize) -> Result<()> {
+        git(
+            &self.repos[index].path,
+            &["fetch", "--all", "--no-recurse-submodules"],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn preflight(&mut self, index: usize) -> Result<()> {
+        let repo = &self.repos[index];
+        let will_change = !changes(repo).await?.is_empty()
+            || repo
+                .modules
+                .iter()
+                .any(|m| self.changing.contains(&repo.path.join(&m.path)));
+        if will_change {
+            self.changing.push(repo.path.clone());
+        }
+        publishable(repo, will_change).await
+    }
+
+    async fn prepare(&mut self, index: usize) -> Result<bool> {
+        let original = &self.repos[index];
+        let current = tree(&self.root).await?;
+        let repo = current
+            .into_iter()
+            .find(|r| r.path == original.path)
+            .context("Repository tree changed during execution")?;
+        if repo.branch != original.branch {
+            bail!("{}: branch changed during execution", repo.path.display());
+        }
+        let changes = changes(&repo).await?;
+        publishable(&repo, !changes.is_empty()).await?;
+        let message = changes
+            .iter()
+            .map(|(name, old, new)| {
+                format!(
+                    "[Automatic] Update submodule {name}: {} -> {}",
+                    &old[..7],
+                    &new[..7]
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let has_changes = !changes.is_empty();
+        self.prepared = Some(Prepared {
+            repo,
+            changes,
+            message,
+        });
+        Ok(has_changes)
+    }
+
+    async fn stage_references(&self) -> Result<()> {
+        let prepared = self.prepared.as_ref().context("No prepared repository")?;
+        for (name, _, _) in &prepared.changes {
+            git(&prepared.repo.path, &["add", "--", name]).await?;
+        }
+        Ok(())
+    }
+
+    async fn commit(&self) -> Result<()> {
+        let prepared = self.prepared.as_ref().context("No prepared repository")?;
+        git(&prepared.repo.path, &["commit", "-m", &prepared.message]).await?;
+        println!("{}:\n{}", prepared.repo.path.display(), prepared.message);
+        Ok(())
+    }
+
+    async fn revalidate(&self) -> Result<()> {
+        tree(&self.root).await?;
+        Ok(())
+    }
+
+    async fn publish(&self) -> Result<()> {
+        let repo = &self
+            .prepared
+            .as_ref()
+            .context("No prepared repository")?
+            .repo;
+        if let Some(branch) = &repo.branch {
+            let remote = git(
+                &repo.path,
+                &["config", "--get", &format!("branch.{branch}.remote")],
+            )
+            .await?;
+            let target = git(
+                &repo.path,
+                &["config", "--get", &format!("branch.{branch}.merge")],
+            )
+            .await?;
+            git(
+                &repo.path,
+                &[
+                    "-c",
+                    "push.followTags=false",
+                    "push",
+                    "--no-force",
+                    "--recurse-submodules=check",
+                    remote.trim(),
+                    &format!("HEAD:{}", target.trim()),
+                ],
+            )
+            .await?;
+            println!("Pushed {}", repo.path.display());
+        } else {
+            println!("Already published (detached): {}", repo.path.display());
+        }
+        Ok(())
+    }
+
+    async fn execute(&mut self, phase: workflow::Phase, index: usize) -> Result<bool> {
+        use workflow::Phase;
+        match phase {
+            Phase::Validate => self.validate().await?,
+            Phase::Fetch => self.fetch(index).await?,
+            Phase::Preflight => self.preflight(index).await?,
+            Phase::Prepare => return self.prepare(index).await,
+            Phase::StageReferences => self.stage_references().await?,
+            Phase::Commit => self.commit().await?,
+            Phase::Revalidate => self.revalidate().await?,
+            Phase::Publish => self.publish().await?,
+            Phase::Done | Phase::Failed => bail!("Terminal workflow has no Git operation"),
+        }
+        Ok(false)
+    }
+}
+
 async fn run() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     if args == ["--help"] || args == ["-h"] {
@@ -297,89 +535,26 @@ async fn run() -> Result<()> {
     let root = PathBuf::from(root.strip_suffix('\n').unwrap_or(&root));
     println!("Validating {} and all nested submodules...", root.display());
     let repos = tree(&root).await?;
-    // Fetch is read-only with respect to working files/commits and push destinations.
-    for repo in &repos {
-        git(&repo.path, &["fetch", "--all", "--no-recurse-submodules"]).await?;
-    }
-    // An inner pointer commit also changes every ancestor's pointer.
-    let mut changing = Vec::<PathBuf>::new();
-    let mut errors = Vec::new();
-    for repo in &repos {
-        let will_change = !changes(repo).await?.is_empty()
-            || repo
-                .modules
-                .iter()
-                .any(|m| changing.contains(&repo.path.join(&m.path)));
-        if will_change {
-            changing.push(repo.path.clone());
+    let mut state = workflow::Workflow::new(repos.len());
+    let mut boundary = GitBoundary {
+        root,
+        repos,
+        changing: Vec::new(),
+        prepared: None,
+    };
+    let mut failure = None;
+    loop {
+        match state.phase {
+            workflow::Phase::Done => break,
+            workflow::Phase::Failed => return Err(failure.context("Workflow rejected its state")?),
+            _ => {}
         }
-        if let Err(e) = publishable(repo, will_change).await {
-            errors.push(format!("{e:#}"));
-        }
-    }
-    if !errors.is_empty() {
-        bail!("{}", errors.join("\n"));
-    }
-    println!("Preflight passed for {} repositories.", repos.len());
-    for original in &repos {
-        // Recheck the whole tree before each operation, including after hooks run.
-        let current = tree(&root).await?;
-        let repo = current
-            .iter()
-            .find(|r| r.path == original.path)
-            .context("Repository tree changed during execution")?;
-        if repo.branch != original.branch {
-            bail!("{}: branch changed during execution", repo.path.display());
-        }
-        let changes = changes(repo).await?;
-        publishable(repo, !changes.is_empty()).await?;
-        if !changes.is_empty() {
-            let messages: Vec<_> = changes
-                .iter()
-                .map(|(name, old, new)| {
-                    format!(
-                        "[Automatic] Update submodule {name}: {} -> {}",
-                        &old[..7],
-                        &new[..7]
-                    )
-                })
-                .collect();
-            let message = messages.join("\n");
-            for (name, _, _) in &changes {
-                git(&repo.path, &["add", "--", name]).await?;
+        match boundary.execute(state.phase, state.cursor).await {
+            Ok(has_changes) => state = state.respond(true, has_changes),
+            Err(error) => {
+                state = state.respond(false, false);
+                failure = Some(error);
             }
-            git(&repo.path, &["commit", "-m", &message]).await?;
-            println!("{}:\n{message}", repo.path.display());
-        }
-        tree(&root).await?;
-        if let Some(branch) = &repo.branch {
-            let remote = git(
-                &repo.path,
-                &["config", "--get", &format!("branch.{branch}.remote")],
-            )
-            .await?;
-            let target = git(
-                &repo.path,
-                &["config", "--get", &format!("branch.{branch}.merge")],
-            )
-            .await?;
-            // Explicit refspec avoids push.default, push.followTags, and remote push refspec surprises.
-            git(
-                &repo.path,
-                &[
-                    "-c",
-                    "push.followTags=false",
-                    "push",
-                    "--no-force",
-                    "--recurse-submodules=check",
-                    remote.trim(),
-                    &format!("HEAD:{}", target.trim()),
-                ],
-            )
-            .await?;
-            println!("Pushed {}", repo.path.display());
-        } else {
-            println!("Already published (detached): {}", repo.path.display());
         }
     }
     println!("All submodule references are committed and pushed.");

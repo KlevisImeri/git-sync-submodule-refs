@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 authors = ["Klevis Imeri"]
 description = "Safely commit and push recursive Git submodule reference updates"
-repository = "https://github.com/KlevisImeri/git-sync-submodule-refs-"
+repository = "https://github.com/KlevisImeri/git-sync-submodule-refs"
 
 [workspace]
 members = ["xtask"]

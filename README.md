@@ -9,7 +9,7 @@ Recursively commit and push submodule reference updates, only when no other unco
 Once a release has been published, install the latest x86_64 RPM directly:
 
 ```sh
-sudo dnf install https://github.com/KlevisImeri/git-sync-submodule-refs-/releases/latest/download/git-sync-submodule-refs.x86_64.rpm
+sudo dnf install https://github.com/KlevisImeri/git-sync-submodule-refs/releases/latest/download/git-sync-submodule-refs.x86_64.rpm
 ```
 
 The RPM installs `/usr/bin/git-sync-submodule-refs` and requires Git; Rust/Cargo is not needed to use it. Locally built aarch64 releases use the filename `git-sync-submodule-refs.aarch64.rpm` instead.
@@ -19,7 +19,7 @@ The RPM installs `/usr/bin/git-sync-submodule-refs` and requires Git; Rust/Cargo
 Requires Rust/Cargo to build, and Git on your `PATH` at runtime. Git operations run through `git-spawn`, using your installed Git rather than libgit2.
 
 ```sh
-cargo install --git https://github.com/KlevisImeri/git-sync-submodule-refs-.git --locked
+cargo install --git https://github.com/KlevisImeri/git-sync-submodule-refs.git --locked
 ```
 
 Ensure `~/.cargo/bin` is on your `PATH`. Git discovers the installed executable as a custom command:

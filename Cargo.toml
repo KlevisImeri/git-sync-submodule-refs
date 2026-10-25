@@ -7,6 +7,11 @@ authors = ["Klevis Imeri"]
 description = "Safely commit and push recursive Git submodule reference updates"
 repository = "https://github.com/KlevisImeri/git-sync-submodule-refs-"
 
+[workspace]
+members = ["xtask"]
+default-members = ["."]
+resolver = "3"
+
 [dependencies]
 anyhow = "1"
 bstr = { version = "1", default-features = false, features = ["std"] }

@@ -4,6 +4,18 @@ Recursively commit and push submodule reference updates, only when no other unco
 
 ## Install
 
+### RPM (Fedora and other DNF-based distributions)
+
+Once a release has been published, install the latest x86_64 RPM directly:
+
+```sh
+sudo dnf install https://github.com/KlevisImeri/git-sync-submodule-refs-/releases/latest/download/git-sync-submodule-refs.x86_64.rpm
+```
+
+The RPM installs `/usr/bin/git-sync-submodule-refs` and requires Git; Rust/Cargo is not needed to use it. Locally built aarch64 releases use the filename `git-sync-submodule-refs.aarch64.rpm` instead.
+
+### From source
+
 Requires Rust/Cargo to build, and Git on your `PATH` at runtime. Git operations run through `git-spawn`, using your installed Git rather than libgit2.
 
 ```sh
@@ -53,6 +65,32 @@ cargo install --path . --locked
 Integration tests use isolated local repositories and bare remotes, not your working projects.
 
 The implementation uses `git-spawn` for command execution and porcelain status parsing, Tokio for its async runtime, `anyhow` for contextual errors, and `bstr` for byte-oriented tree/index parsing. Tests use `tempfile` for temporary repositories and `assert_cmd` for CLI assertions and timeouts. Recursive validation and push ordering remain explicit in this tool; no broad commit-all or sync workflow helpers are used.
+
+## Releases
+
+Release creation runs entirely on your Linux machine, with no GitHub Actions workflow:
+
+```sh
+cargo xtask deploy patch  # 0.1.0 -> 0.1.1: fixes
+cargo xtask deploy minor  # 0.1.0 -> 0.2.0: features
+cargo xtask deploy major  # 0.1.0 -> 1.0.0: breaking changes
+```
+
+Run just one of these commands. Each increments the chosen component and resets smaller components to zero.
+
+Prerequisites:
+
+- A clean, committed working tree on a branch; `origin` must point to this GitHub repository. Deploy pushes the current branch and its new tag to `origin` without force.
+- Rust with rustfmt, Clippy, and the native musl target (`rustup target add x86_64-unknown-linux-musl`, or `aarch64-unknown-linux-musl` on ARM).
+- A native musl C toolchain (Fedora: `sudo dnf install musl-gcc`; Ubuntu: `sudo apt-get install musl-tools`). The `rpm` Rust library is a dependency of `xtask`, tracked in `Cargo.lock`; no packaging tool installation, `rpmbuild`, or RPM spec file is needed.
+- GitHub CLI (`gh`), authenticated with permission to push and create releases (`gh auth login`), plus working Git push authentication.
+- Make and the pinned Aeneas, Charon, and Lean tools described in [verification/README.md](verification/README.md).
+
+Deploy runs `cargo fmt --all -- --check`, workspace Clippy with warnings denied, all workspace Rust tests (including doctests), and `make verify-lean`. If verification regenerates tracked files, commit those changes and rerun deploy. After checks pass, it bumps `Cargo.toml`/`Cargo.lock`, builds the binary, packages it directly with the `rpm` Rust library using package metadata from `Cargo.toml`, commits the version bump, creates an annotated `v<version>` tag, pushes the branch and tag atomically, and creates a GitHub Release with the RPM attached. No release or push occurs before checks and RPM building succeed.
+
+Deploy produces a statically linked musl binary and an unsigned RPM at `target/rpm/git-sync-submodule-refs.<architecture>.rpm`, containing the binary and MIT license, with `git` as a runtime dependency. Builds support native Linux x86_64 and aarch64. Signing RPMs or maintaining a DNF repository is not included.
+
+If a build fails after the version bump, the uncommitted version changes remain for review; restore only those changes before retrying deploy. If publishing fails after the push, the command prints recovery commands; do not bump the version again to retry uploading the same release.
 
 ## Formal verification
 

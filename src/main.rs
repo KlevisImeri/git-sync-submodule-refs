@@ -280,6 +280,28 @@ async fn changes(repo: &Repo) -> Result<Vec<(String, String, String)>> {
     Ok(changes)
 }
 
+async fn head_has_remote_tag(path: &Path) -> Result<bool> {
+    let commit = head(path).await?;
+    let remotes = git(path, &["remote"]).await?;
+
+    for remote in remotes.lines().filter(|line| !line.is_empty()) {
+        let refs = git(path, &["ls-remote", "--tags", remote]).await?;
+
+        for line in refs.lines() {
+            let mut fields = line.split_whitespace();
+
+            if let (Some(oid), Some(reference)) = (fields.next(), fields.next())
+                && oid == commit
+                && reference.starts_with("refs/tags/")
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 async fn publishable(repo: &Repo, will_change: bool) -> Result<()> {
     let path = &repo.path;
     if let Some(branch) = &repo.branch {
@@ -326,9 +348,10 @@ async fn publishable(repo: &Repo, will_change: bool) -> Result<()> {
         .await?
         .trim()
         .is_empty()
+            && !head_has_remote_tag(path).await?
         {
             bail!(
-                "{}: detached HEAD has no published remote-tracking reference",
+                "{}: detached HEAD has no published remote-tracking branch or matching remote tag",
                 path.display()
             );
         }
